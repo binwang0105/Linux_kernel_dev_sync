@@ -175,20 +175,7 @@ SYSCALL_DEFINE1(light_evt_signal, struct light_intensity __user *, user_light_in
 }
 
 SYSCALL_DEFINE1(light_evt_destroy, int, event_id){
-	int err;
-	struct light_intensity li;
-	struct light_event_node * the_evt;
 
-	spin_lock(&light_event_list_lock);
-		the_evt = get_evt_by_id(light_event_list, event_id);
-	if(the_evt == NULL){
-		return -EFAULT;
-	}
-
-	kfifo_out(&light_intensity_fifo, void *li, sizeof(struct light_intensity));
-	spin_unlock(&light_event_list_lock);
-
-	
 
 	return 0;
 }
