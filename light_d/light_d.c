@@ -60,8 +60,6 @@ int main(int argc, char **argv)
 	cur_device = -1;
 
 
-printf("wtfffffffffffffffffffffffffffff\n");
-
 	if (argc != 2) {
 		printf("Invalid arguments - use ./light_d [-e] [-d]\n");
 		return EXIT_FAILURE;
@@ -116,7 +114,7 @@ static int poll_sensor_data(struct sensors_poll_device_t *sensors_device)
     float cur_intensity = 0;
 	struct light_intensity li;
 
-
+	int err;
     int i; 
       
 	if (cur_device == DEVICE) {
@@ -130,8 +128,13 @@ static int poll_sensor_data(struct sensors_poll_device_t *sensors_device)
 			cur_intensity = buffer[i].light;
 			printf("%f\n", cur_intensity);
 			li.cur_intensity = (int)(cur_intensity * 100);
-			if(syscall(__NR_set_light_intensity, &li)){
-				return -1;
+			err = syscall(__NR_light_evt_signal, &li);
+			if(err < 0){
+				return err;
+			}
+			err = syscall(__NR_set_light_intensity, &li);
+			if(err < 0){
+				return err;
 			}
 		}
 	}
@@ -145,8 +148,13 @@ static int poll_sensor_data(struct sensors_poll_device_t *sensors_device)
 		cur_intensity = poll_sensor_data_emulator();
 		printf("%f\n", cur_intensity);
 		li.cur_intensity = (int)(cur_intensity * 100);
-		if(syscall(__NR_set_light_intensity, &li)){
-			return -1;
+		err = syscall(__NR_light_evt_signal, &li);
+		if(err < 0){
+			return err;
+		}
+		err = syscall(__NR_set_light_intensity, &li);
+		if(err < 0){
+			return err;
 		}
 	}
 	

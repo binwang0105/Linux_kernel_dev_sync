@@ -16,9 +16,12 @@ struct light_event_node {
 	spinlock_t light_event_lock;
 	int waitq_size;
 	struct list_head list;
+	int in_destroy;
 };
 
 LIST_HEAD(light_event_list);
+/* add static? */
+
 struct kfifo light_intensity_fifo;
 
 DEFINE_SPINLOCK(light_event_list_lock);
@@ -33,7 +36,7 @@ int initialize_fifo(void){
 	spin_lock(&trivial_lock);
 	if(!initialized){
 		initialized = 1;
-		err = kfifo_alloc(&light_intensity_fifo,sizeof(struct light_intensity)*WINDOW,GFP_KERNEL);
+		err = kfifo_alloc(&light_intensity_fifo,sizeof(struct light_intensity)*32,GFP_KERNEL);
 		if(err < 0){
 			spin_unlock(&trivial_lock);
 			return err;
@@ -43,10 +46,10 @@ int initialize_fifo(void){
 	return 0;
 }
 
-struct light_event_node* get_evt_by_id(struct list_head * evt_list, int id){
+struct light_event_node* get_evt_by_id(int id){
 	struct light_event_node* result;
 	
-	list_for_each_entry(result,evt_list,list){
+	list_for_each_entry(result,&light_event_list,list){
 		if(result->id == id){
 			return result;
 		}
@@ -116,7 +119,7 @@ SYSCALL_DEFINE1(light_evt_create, struct event_requirements __user *, intensity_
 	init_waitqueue_head(&(new_evt->waitq));
 	spin_lock_init(&(new_evt->light_event_lock));
 	new_evt->waitq_size = 0;
-
+	new_evt->in_destroy = 0;
 	spin_lock(&light_event_list_lock);
 	new_evt->id = cur_id++;
 	list_add(&(new_evt->list), &light_event_list);
@@ -131,7 +134,7 @@ SYSCALL_DEFINE1(light_evt_wait, int, event_id){
 	DEFINE_WAIT(wait);
 	struct light_event_node * the_evt;
 	spin_lock(&light_event_list_lock);
-	the_evt = get_evt_by_id(&light_event_list, event_id);
+	the_evt = get_evt_by_id(event_id);
 	if(the_evt == NULL){
 		spin_unlock(&light_event_list_lock);
 		return -ENODATA;
@@ -150,14 +153,20 @@ SYSCALL_DEFINE1(light_evt_wait, int, event_id){
 		prepare_to_wait(&the_evt->waitq,&wait,TASK_INTERRUPTIBLE);
 		schedule();
 		spin_lock(&the_evt->light_event_lock);
+		if(the_evt->in_destroy){
+			--the_evt->waitq_size;
+			finish_wait(&the_evt->waitq,&wait);
+			spin_unlock(&(the_evt->light_event_lock));
+			return 0;
+		}
 		ret = get_condition(the_evt);
 	}
-	finish_wait(&the_evt->waitq,&wait);
 	--the_evt->waitq_size;
 	if(ret < 0){
 		spin_unlock(&the_evt->light_event_lock);
 		return ret;
 	}
+	finish_wait(&the_evt->waitq,&wait);
 	spin_unlock(&(the_evt->light_event_lock));
 
 	return 0;
@@ -165,39 +174,91 @@ SYSCALL_DEFINE1(light_evt_wait, int, event_id){
 
 
 SYSCALL_DEFINE1(light_evt_signal, struct light_intensity __user *, user_light_intensity){
-	int err;
-	err = initialize_fifo();
-	if(err < 0){
-		return err;
+	int ret;
+	int len;
+	struct light_intensity *new_li;
+	struct light_intensity tmp_li;
+	struct light_event_node *light_evt;
+
+	ret = initialize_fifo();
+	if(ret < 0){
+		return ret;
 	}
 
+	new_li = kmalloc(sizeof(struct light_intensity),GFP_KERNEL);
+	if(new_li == NULL){
+		return -ENOMEM;
+	}
+
+	ret = copy_from_user(new_li,user_light_intensity,sizeof(struct light_intensity));
+	if(ret < 0){
+		return -EFAULT;
+	}
+
+	spin_lock(&light_intensity_fifo_lock);
+	len = kfifo_len(&light_intensity_fifo);
+	if(len < sizeof(struct light_intensity)*WINDOW){
+		ret = kfifo_in(&light_intensity_fifo,new_li,sizeof(struct light_intensity));
+		if(ret < 0){
+			spin_unlock(&light_intensity_fifo_lock);
+			return ret;
+		}
+	}else{
+		ret = kfifo_out(&light_intensity_fifo,&tmp_li,sizeof(struct light_intensity));
+		if(ret < 0){
+			spin_unlock(&light_intensity_fifo_lock);
+			return ret;
+		}
+		ret = kfifo_in(&light_intensity_fifo,new_li,sizeof(struct light_intensity));
+		if(ret < 0){
+			spin_unlock(&light_intensity_fifo_lock);
+			return ret;
+		}
+	}
+	spin_lock(&(light_event_list_lock));
+	list_for_each_entry(light_evt,&light_event_list,list){
+		ret = get_condition(light_evt);
+		if(ret < 0){
+			spin_unlock(&(light_event_list_lock));
+			spin_unlock(&light_intensity_fifo_lock);
+			return ret;
+		}
+		if(ret){
+			wake_up(&(light_evt->waitq));
+		}
+	}
+	spin_unlock(&(light_event_list_lock));
+	spin_unlock(&light_intensity_fifo_lock);
+	
 	return 0;
 }
 
 SYSCALL_DEFINE1(light_evt_destroy, int, event_id){
-	int err;
-	struct light_intensity li;
-	struct light_event_node * the_evt;
+
+	struct light_event_node *light_event;
 
 	spin_lock(&light_event_list_lock);
-		the_evt = get_evt_by_id(light_event_list, event_id);
-	if(the_evt == NULL){
-		return -EFAULT;
+	light_event = get_evt_by_id(event_id);
+	if(light_event == NULL){
+		spin_unlock(&light_event_list_lock);
+		return -ENODATA;
 	}
-
-	kfifo_out(&light_intensity_fifo, void *li, sizeof(struct light_intensity));
+	list_del(&(light_event->list));
 	spin_unlock(&light_event_list_lock);
 
-	
 
+
+	spin_lock(&light_event->light_event_lock);
+	light_event->in_destroy = true;
+	while(light_event->waitq_size > 0){
+		spin_unlock(&light_event->light_event_lock);
+
+		wake_up(&(light_event->waitq));
+
+		spin_lock(&light_event->light_event_lock);
+	}
+	spin_unlock(&light_event->light_event_lock);
+	kfree(light_event);
 	return 0;
 }
-
-
-
-
-
-
-
-
 
