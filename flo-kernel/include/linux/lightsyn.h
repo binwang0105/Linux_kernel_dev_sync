@@ -3,7 +3,7 @@
 
 #include <linux/light.h>
 
-#define NOISE 20
+#define NOISE 10
 #define WINDOW 20
 
 struct event_requirements {

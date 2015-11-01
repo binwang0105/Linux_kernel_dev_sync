@@ -94,7 +94,7 @@ int main(int argc, char **argv)
 		if(poll_sensor_data(sensors_device)){
 			return -1;
 		}
-		usleep((useconds_t) TIME_INTERVAL);
+		usleep((useconds_t) TIME_INTERVAL*1000);
 	}
 
 	return EXIT_SUCCESS;
